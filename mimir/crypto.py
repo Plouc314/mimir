@@ -28,7 +28,10 @@ HEADER_SIZE = 58  # also the offset at which the ciphertext body begins
 
 
 def derive_key(password: str, salt: bytes) -> bytes:
-    kdf = Scrypt(salt=salt, length=32, n=2**14, r=8, p=1)
+    # n=2**20 (~1 GiB, memory-hard) so the encrypted vault stays brute-force
+    # resistant even when stored somewhere publicly readable. The cost is paid
+    # once per session unlock, not per command.
+    kdf = Scrypt(salt=salt, length=32, n=2**20, r=8, p=1)
     return kdf.derive(password.encode("utf-8"))
 
 
@@ -88,10 +91,14 @@ class VaultFile:
         if len(raw) < HEADER_SIZE + TAG_SIZE:
             raise ValueError("Vault file is too small or corrupted")
 
+        header = raw[:HEADER_SIZE]
         nonce = raw[_NONCE_OFFSET:HEADER_SIZE]
         body = raw[HEADER_SIZE:]
         try:
-            plaintext = AESGCM(session.key).decrypt(nonce, body, None)
+            # The header is authenticated (AAD) but not encrypted, so tampering
+            # with the version/modified/salt/nonce fields fails the tag check
+            # just like tampering with the ciphertext does.
+            plaintext = AESGCM(session.key).decrypt(nonce, body, header)
         except Exception:
             raise ValueError("Decryption failed: wrong password or corrupted vault")
 
@@ -108,17 +115,19 @@ class VaultFile:
         vault.modified = int(time.time())
 
         nonce = os.urandom(NONCE_SIZE)
-        body = AESGCM(session.key).encrypt(nonce, vault.to_json(), None)
-        return b"".join(
+        header = b"".join(
             [
                 MAGIC,
                 bytes([vault.version]),
                 struct.pack(">Q", vault.modified),
                 vault.salt,
                 nonce,
-                body,
             ]
         )
+        # Authenticate the header (AAD) so the plaintext fields in front of the
+        # ciphertext are covered by the GCM tag.
+        body = AESGCM(session.key).encrypt(nonce, vault.to_json(), header)
+        return header + body
 
     @classmethod
     def write(cls, path: str, vault: Vault, session: Session) -> None:

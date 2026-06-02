@@ -384,6 +384,57 @@ class SyncTests(CliTestCase):
         again = self.mimir("push")
         self.assertEqual(again.returncode, 0, again.stderr)
 
+    def test_push_preserves_unrelated_branch_and_changes(self) -> None:
+        # The vault may share a directory with an unrelated repo the user is
+        # working in. Pushing the vault (on its own branch) must leave the
+        # user on their branch with their uncommitted work intact.
+        vault_dir = os.path.dirname(self.vault_path)
+        git_env = dict(
+            os.environ,
+            GIT_AUTHOR_NAME="user",
+            GIT_AUTHOR_EMAIL="user@test.invalid",
+            GIT_COMMITTER_NAME="user",
+            GIT_COMMITTER_EMAIL="user@test.invalid",
+        )
+
+        def git(*args: str) -> None:
+            subprocess.run(
+                ["git", "-C", vault_dir, *args],
+                check=True,
+                capture_output=True,
+                text=True,
+                env=git_env,
+            )
+
+        def current_branch() -> str:
+            return subprocess.run(
+                ["git", "-C", vault_dir, "branch", "--show-current"],
+                capture_output=True,
+                text=True,
+                env=git_env,
+            ).stdout.strip()
+
+        # A pre-existing repo on branch "work" with a committed tracked file...
+        git("init")
+        git("checkout", "-b", "work")
+        work_file = os.path.join(vault_dir, "work.txt")
+        with open(work_file, "w") as f:
+            f.write("committed\n")
+        git("add", "work.txt")
+        git("commit", "-m", "work")
+        # ...and an uncommitted edit to it.
+        with open(work_file, "w") as f:
+            f.write("uncommitted edit\n")
+
+        self.mimir("add", "gmail")
+        r = self.mimir("push")  # vault branch defaults to "main", distinct from "work"
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+        # Back on the user's branch with their uncommitted change restored.
+        self.assertEqual(current_branch(), "work")
+        with open(work_file) as f:
+            self.assertEqual(f.read(), "uncommitted edit\n")
+
 
 if __name__ == "__main__":
     unittest.main()

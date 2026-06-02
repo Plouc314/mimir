@@ -39,9 +39,9 @@ Each namespace contains **key-value pairs**:
 
 **Encryption:** The entire vault is encrypted as a single blob using **AES-256-GCM** (authenticated encryption). There is no plaintext data in the vault file — namespace names, keys, and all values are encrypted.
 
-**Key derivation:** The master password is stretched using **scrypt** (memory-hard, resistant to brute-force) with a random salt generated at `init` time.
+**Key derivation:** The master password is stretched using **scrypt** (memory-hard, resistant to brute-force) with a random salt generated at `init` time. Parameters are `n=2**20, r=8, p=1` (~1 GiB of memory per derivation), chosen so the publicly-stored blob resists offline brute-force. The cost is paid once per session unlock, not per command.
 
-**Integrity:** AES-GCM provides built-in authentication. Any tampering with the file will cause decryption to fail with an explicit error.
+**Integrity:** AES-GCM provides built-in authentication. The fixed-size file header (magic, version, modified timestamp, salt, nonce) is passed as **associated data (AAD)** so it is authenticated alongside the ciphertext — tampering with any header field, not just the ciphertext, causes decryption to fail with an explicit error.
 
 **Master password:** Set once at `mimir init`. There is no password recovery — losing the master password means losing access to the vault.
 
@@ -56,6 +56,7 @@ The master password is required **once per session**. On first use, the user is 
 - The session temp file is deleted by `mimir lock` or on system reboot
 - The session has a configurable idle timeout (default: 15 minutes); after inactivity the temp file is removed and the next command re-prompts
 - Any command that needs vault access will auto-prompt if no active session exists
+- The temp path is fixed and world-predictable, so it is opened with `O_NOFOLLOW` (and recreated, not opened-in-place, on write) and the read side verifies via `fstat` that the file is a regular file owned by the current user. This prevents a local attacker from pre-planting the path as a symlink to redirect the key write or truncate an arbitrary file.
 
 ---
 
@@ -126,6 +127,14 @@ mimir config set branch main          # optional, defaults to main
 - If they differ, mimir checks the branch out — **creating it as an orphan branch** if it does not exist, so the vault's history is independent of any other branch already present (e.g. an unrelated `main`). This lets mimir share a directory that is already a git repo without entangling its history.
 
 Mimir **does not own or create a `.gitignore`** — the directory may already have one in use. Instead it stages **only the vault file** by explicit path (never `git add -A` / `add .`), so nothing else in the directory is ever committed.
+
+**Preserving the user's working state:** because the vault may share a directory with an unrelated repo the user is actively working in, mimir must never disturb their current branch or uncommitted work when it switches to the vault branch (the `pull` path even runs `git reset --hard`). So when a `push`/`pull` will switch *away* from the current branch, mimir:
+
+1. Records the current branch (or commit, if detached/unborn) and, if there are tracked staged/unstaged changes, stashes them (`git stash push` — **tracked changes only**, so the untracked vault file is left in place).
+2. Switches to the vault branch and performs the push/pull.
+3. In a `finally` step (so it runs even if the operation fails), checks the original branch back out and pops the stash.
+
+When mimir is already on the vault branch (a dedicated vault repo) this is a no-op, so the pending vault changes stay in the working tree to be committed. Untracked files are never at risk: `git checkout`/`reset --hard` leave them untouched.
 
 **Staleness guard:** `pull` compares the incoming vault's `modified` header timestamp against the local file's. If the local file is newer, `pull` refuses to overwrite it (to avoid clobbering un-pushed changes) and tells the user, unless `-f` / `--force` is given. `push` does not need this guard — it always advances history.
 

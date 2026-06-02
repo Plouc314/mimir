@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import struct
 import time
 from typing import Optional
@@ -27,13 +28,20 @@ class Session:
     def resume(timeout: int = DEFAULT_SESSION_TIMEOUT) -> Optional[Session]:
         """Return the active session from the temp file, or None if none/expired."""
         path = _session_path()
-        if not os.path.exists(path):
-            return None
+        # O_NOFOLLOW + an fstat ownership/type check guard against a local
+        # attacker pre-planting /tmp/mimir-<uid> as a symlink to redirect the
+        # read (the path is fixed and world-predictable).
         try:
-            with open(path, "rb") as f:
-                data = f.read(_RECORD_SIZE)
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
         except OSError:
             return None
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+                return None
+            data = os.read(fd, _RECORD_SIZE)
+        finally:
+            os.close(fd)
 
         if len(data) < _RECORD_SIZE:
             return None
@@ -58,7 +66,15 @@ class Session:
 
     def persist(self) -> None:
         record = self.key + struct.pack(">Q", int(time.time()))
-        fd = os.open(_session_path(), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        path = _session_path()
+        # Unlink first, then create with O_NOFOLLOW: if an attacker pre-planted
+        # the path as a symlink, O_NOFOLLOW makes the open fail rather than
+        # truncating/writing the key through the link to an arbitrary file.
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
         try:
             os.write(fd, record)
         finally:

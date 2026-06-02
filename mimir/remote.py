@@ -6,6 +6,8 @@ import subprocess
 import sys
 import textwrap
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 from mimir.crypto import VaultFile
 
@@ -117,6 +119,48 @@ class GitRemote(Remote):
             # No such branch anywhere: start an independent history for the vault.
             self._git(repo_dir, "checkout", "--orphan", self.branch)
 
+    def _has_tracked_changes(self, repo_dir: str) -> bool:
+        """True if the working tree has staged or unstaged tracked changes."""
+        unstaged = self._git(repo_dir, "diff", "--quiet", check=False).returncode != 0
+        staged = self._git(repo_dir, "diff", "--cached", "--quiet", check=False).returncode != 0
+        return unstaged or staged
+
+    @contextmanager
+    def _preserve_state(self, repo_dir: str) -> Iterator[None]:
+        """Run a vault-branch operation without disturbing the user's branch.
+
+        The vault may share a directory with an unrelated repo, so switching to
+        the vault branch (and the ``reset --hard`` on pull) must not clobber the
+        user's current branch or their uncommitted work. If the operation will
+        switch branches, stash any tracked changes first, then restore the
+        original branch and pop the stash afterwards. Untracked files (including
+        the vault file itself) are left untouched.
+
+        When already on the vault branch this is a no-op, so the pending vault
+        changes stay in the working tree to be committed.
+        """
+        current = self._git(repo_dir, "branch", "--show-current", check=False).stdout.strip()
+        if current == self.branch:
+            yield
+            return
+
+        # Capture where to return: branch name, or the commit if detached/unborn.
+        has_head = self._ref_exists(repo_dir, "HEAD")
+        stashed = False
+        if has_head and self._has_tracked_changes(repo_dir):
+            self._git(repo_dir, "stash", "push", "-m", "mimir auto-stash")
+            stashed = True
+        try:
+            yield
+        finally:
+            target = current or (
+                self._git(repo_dir, "rev-parse", "HEAD", check=False).stdout.strip()
+            )
+            if target:
+                self._git(repo_dir, "checkout", target, check=False)
+            if stashed:
+                self._git(repo_dir, "stash", "pop", check=False)
+
     # -- operations ---------------------------------------------------------
 
     def push(self, vault_path: str) -> None:
@@ -125,20 +169,23 @@ class GitRemote(Remote):
         vault_file = os.path.basename(vault_path)
 
         self._ensure_repo(repo_dir)
-        self._checkout_branch(repo_dir)
+        with self._preserve_state(repo_dir):
+            self._checkout_branch(repo_dir)
 
-        # -f overrides any .gitignore in the directory: mimir intentionally
-        # tracks exactly this one file, whatever ignore rules are in place.
-        self._git(repo_dir, "add", "-f", "--", vault_file)
-        # Commit only when the vault file actually changed. `diff --cached`
-        # returns non-zero when there is something staged to commit; on a repo
-        # with no commits yet it compares against the empty tree, so the first
-        # add always counts as a change.
-        staged = self._git(repo_dir, "diff", "--cached", "--quiet", "--", vault_file, check=False)
-        if staged.returncode != 0:
-            self._git(repo_dir, "commit", "-m", "Update vault", "--", vault_file)
+            # -f overrides any .gitignore in the directory: mimir intentionally
+            # tracks exactly this one file, whatever ignore rules are in place.
+            self._git(repo_dir, "add", "-f", "--", vault_file)
+            # Commit only when the vault file actually changed. `diff --cached`
+            # returns non-zero when there is something staged to commit; on a
+            # repo with no commits yet it compares against the empty tree, so
+            # the first add always counts as a change.
+            staged = self._git(
+                repo_dir, "diff", "--cached", "--quiet", "--", vault_file, check=False
+            )
+            if staged.returncode != 0:
+                self._git(repo_dir, "commit", "-m", "Update vault", "--", vault_file)
 
-        self._git(repo_dir, "push", "-u", "origin", self.branch)
+            self._git(repo_dir, "push", "-u", "origin", self.branch)
 
     def pull(self, vault_path: str, force: bool = False) -> None:
         self._ensure_git()
@@ -162,8 +209,9 @@ class GitRemote(Remote):
                     "Use --force to override."
                 )
 
-        self._checkout_branch(repo_dir)
-        # Fast-forward the branch to the remote and restore the vault file.
-        # Only the vault file is tracked on this branch, so untracked files in
-        # the directory are left untouched.
-        self._git(repo_dir, "reset", "--hard", f"origin/{self.branch}")
+        with self._preserve_state(repo_dir):
+            self._checkout_branch(repo_dir)
+            # Fast-forward the branch to the remote and restore the vault file.
+            # Only the vault file is tracked on this branch, so untracked files
+            # in the directory are left untouched.
+            self._git(repo_dir, "reset", "--hard", f"origin/{self.branch}")
