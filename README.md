@@ -18,7 +18,7 @@ Secrets are organized into **namespaces** (one per account/service), each holdin
 Requires Python 3.9+ on Linux or macOS. `git` is optional and only needed for `push`/`pull`.
 
 ```sh
-pip install mimir
+pip install mimir-vault
 ```
 
 Or run from a checkout with [uv](https://docs.astral.sh/uv/):
