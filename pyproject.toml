@@ -1,6 +1,6 @@
 [project]
 name = "mimir-vault"
-version = "0.1.0"
+version = "0.1.2"
 description = "A minimal, self-contained CLI vault for managing personal account secrets"
 readme = "README.md"
 requires-python = ">=3.9.2"
@@ -21,6 +21,7 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/Plouc314/mimir"
 Repository = "https://github.com/Plouc314/mimir"
+PyPI = "https://pypi.org/project/mimir-vault/"
 
 [project.scripts]
 mimir = "mimir.cli:main"

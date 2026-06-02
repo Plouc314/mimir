@@ -1,6 +1,10 @@
 # Mimir
 
+[![PyPI](https://img.shields.io/pypi/v/mimir-vault.svg)](https://pypi.org/project/mimir-vault/)
+
 A minimal, self-contained CLI vault for your account secrets. Everything lives in a single encrypted file you can store anywhere — recover it on any machine with just your master password.
+
+Published on PyPI as [`mimir-vault`](https://pypi.org/project/mimir-vault/).
 
 - **Doomsday recovery** — lose every device and still get all your accounts back from the vault file and your password.
 - **Daily driver** — one unlock per session, short commands, readable output.
@@ -110,6 +114,10 @@ mimir config set session-timeout 0      # 0 = never time out
 | `branch` | `main` | Branch to push to and pull from |
 
 Config is a plain-text file at `~/.config/mimir/config` and is never encrypted.
+
+## Releasing
+
+Build and publish instructions live in [`publish.md`](publish.md).
 
 ## Security notes
 
